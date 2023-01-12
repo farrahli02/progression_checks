@@ -1,0 +1,221 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print list of rules for a program or stream
+
+import sys
+import psycopg2
+import re
+from helpers import getProgram, getStream, getSubject
+
+# define any local helper functions here
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} (ProgramCode|StreamCode)"
+db = None
+
+### process command-line args
+ 
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+code = sys.argv[1]
+if len(code) == 4:
+  codeOf = "program"
+elif len(code) == 6:
+  codeOf = "stream"
+
+p_query = """
+select p.name, p.uoc, p.duration, o.longname, r.type, r.min_req, a.name, a.definition
+from programs p
+join orgunits o on p.offeredby = o.id
+join program_rules pr on cast(p.code as int) = pr.program
+join rules r on pr.rule = r.id
+join academic_object_groups a on r.ao_group = a.id
+where p.code = %s
+order by r.id
+"""
+
+s_query = """
+select s.name, o.longname, r.type, r.min_req, r.max_req, a.name, a.defby, a.definition
+from streams s
+join orgunits o on s.offeredby = o.id
+join stream_rules sr on s.id = sr.stream
+join rules r on sr.rule = r.id
+join academic_object_groups a on r.ao_group = a.id
+where s.code = %s
+order by r.id
+"""
+
+# Helper function that prints stream code and name and deals with alternative streams
+def printStreams(string):
+  # Print stream name
+  if (getStream(db, string) is not None):
+    stream = getStream(db, string)
+    stream_name = stream[2]
+  elif (getSubject(db, string) is not None):
+    stream = getSubject(db, string)
+    stream_name = stream[2]
+  else :
+    stream_name = '???'
+
+  # Deal with alternative subjects
+  if (string[0] == '{'):        
+    # Print stream name
+    if (getStream(db, string[1:9]) is not None):
+      stream = getStream(db, string[1:9])
+      stream_name = stream[2]
+    elif (getSubject(db, string[1:9]) is not None):
+      stream = getSubject(db, string[1:9])
+      stream_name = stream[2]
+    else :
+      stream_name = '???'
+    print(f"- {string[1:9]} {stream_name}")
+
+    # Print stream name
+    if (getStream(db, string[10:18]) is not None):
+      stream = getStream(db, string[10:18])
+      stream_name = stream[2]
+    elif (getSubject(db, string[10:18]) is not None):
+      stream = getSubject(db, string[10:18])
+      stream_name = stream[2]
+    else :
+      stream_name = '???'
+    print(f"  or {string[10:18]} {stream_name}")
+  else: 
+    print(f"- {string} {stream_name}")
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  cur = db.cursor()
+  if codeOf == "program":
+    progInfo = getProgram(db,code)
+    if not progInfo:
+      print(f"Invalid program code {code}")
+      exit()
+
+    cur.execute(p_query, [code])
+    res = cur.fetchall()
+ 
+    # Print out the program information
+    print(f"{code} {progInfo[2]}, {progInfo[3]} UOC, {progInfo[6]/12} years")
+    print(f"- offered by {res[1][3]}")
+ 
+    # List the rules for Program
+    print("Academic Requirements:")
+    # ... add your code here ...
+
+    for p_name, uoc, duration, o_name, rule_code, min_req, ao_group, ao_def in res:
+
+      # Done Stream
+      if (rule_code == 'DS'):
+        print(f"{min_req} stream(s) from {ao_group}")
+        for string in ao_def.split(","):
+          printStreams(string)
+      
+      # Core Courses
+      elif (rule_code == 'CC'):
+        # Deal with only one core course
+        if ("," not in ao_def):
+          print(f"{ao_group}")
+          printStreams(ao_def)
+        else: 
+          print(f"all courses from {ao_group}")
+          for string in ao_def.split(","):
+            printStreams(string)
+
+      # Prescribed Electives
+      elif (rule_code == 'PE'):
+        print(f"{min_req} UOC courses from {ao_group}")
+        for string in ao_def.split(","):
+          printStreams(string)      
+
+      # Free Electives
+      elif (rule_code == 'FE'):
+        print(f"{min_req} UOC of Free Electives")
+
+      # General Education
+      elif (rule_code == 'GE'):
+        print(f"{min_req} UOC of General Education")
+
+  
+  # Print out the stream information
+  elif codeOf == "stream":
+    strmInfo = getStream(db,code)
+    if not strmInfo:
+      print(f"Invalid stream code {code}")
+      exit()
+    
+    cur.execute(s_query, [code])
+    res = cur.fetchall()
+
+    # Print out the stream information
+    print(f"{code} {strmInfo[2]}")
+    print(f"- offered by {res[1][1]}")
+    print("Academic Requirements:")
+    
+    # List the rules for Stream
+    for s_name, org, rule_code, min_req, max_req, ao_group, ao_defby, ao_def in res:
+      
+      # Done Stream
+      if (rule_code == 'DS'):
+        print(f"{min_req} stream(s) from {ao_group}")
+        for string in ao_def.split(","):   
+          printStreams(string)
+      
+      # Core Courses
+      elif (rule_code == 'CC'):
+        # Deal with only one core course
+        if (',' not in ao_def):
+          print(f"{ao_group}")
+          printStreams(ao_def)
+        else: 
+          print(f"all courses from {ao_group}")
+          for string in ao_def.split(","):
+            printStreams(string)
+
+      # Prescribed Electives
+      elif (rule_code == 'PE'):
+        if (min_req is None and max_req is None):
+          print(f"{ao_group}")
+        elif (min_req is not None and max_req is None):
+          print(f"at least {min_req} UOC courses from {ao_group}")
+        elif (min_req is None and max_req is not None):
+          print(f"up to {max_req} UOC courses from {ao_group}")
+        elif (min_req < max_req and min_req is not None and max_req is not None):
+          print(f"between {min_req} and {max_req} UOC courses from {ao_group}")
+        elif (min_req == max_req and min_req is not None and max_req is not None):
+          print(f"{min_req} UOC courses from {ao_group}")
+
+        if (ao_defby == 'enumerated'):
+          for string in ao_def.split(","):
+            printStreams(string)
+        elif (ao_defby == 'pattern'):
+          print(f"- courses matching {ao_def}")
+
+      # Free Electives
+      elif (rule_code == 'FE'):
+        if (min_req is None and max_req is None):
+          print(f"{ao_group}")
+        elif (min_req is not None and max_req is None):
+          print(f"at least {min_req} UOC of Free Electives")
+        elif (min_req is None and max_req is not None):
+          print(f"up to {max_req} UOC courses from {ao_group}")
+        elif (min_req < max_req and min_req is not None and max_req is not None):
+          print(f"between {min_req} and {max_req} UOC of Free Electives")
+        elif (min_req == max_req and min_req is not None and max_req is not None):
+          print(f"{min_req} UOC of Free Electives")
+
+      # General Education
+      elif (rule_code == 'GE'):
+        print(f"{min_req} UOC of General Education")
+
+
+
+except Exception as err:
+  print(err)
+finally:
+  if db:
+    db.close()
+
+

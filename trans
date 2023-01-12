@@ -1,0 +1,104 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... print a transcript for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent
+
+# define any local helper functions here
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+  zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+  print(f"Invalid student ID {zid}")
+  exit(1)
+
+# Manipulate database
+
+query = """
+select s.code,t.code,s.name,e.mark,e.grade,s.uoc
+from students st
+join course_enrolments e on e.student = st.id
+join courses c on c.id = e.course
+join subjects s on s.id = c.subject
+join terms t on c.term = t.id
+where st.id = %s
+order by t.starting, s.code
+"""
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  cur = db.cursor()
+  stuInfo = getStudent(db,zid)
+  if not stuInfo:
+    print(f"Invalid student ID {zid}")
+    exit()
+
+  cur.execute(query, [zid])
+  res = cur.fetchall()
+
+  # Print out the zid and name
+  print(f"{zid} {stuInfo[1]}, {stuInfo[2]}")
+
+  # Print transcript
+  total_uoc = 0
+  wam_mark = 0
+  wam_uoc = 0
+  wam = 0
+  for course_code, term, subject, mark, grade, uoc in res:
+    # Change None grades to -
+    if (mark is None): 
+      mark = '-'
+
+    # Print out results based on grades
+    if (grade == 'HD' or grade == 'DN' or grade == 'CR' or grade == 'PS'):
+      total_uoc = total_uoc + uoc
+      wam_mark = wam_mark + mark*uoc
+      wam_uoc = wam_uoc + uoc
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc")
+
+    elif (grade == 'SY' or grade == 'EC' or grade == 'NC' or grade == 'XE' or grade == 'T'):
+      total_uoc = total_uoc + uoc
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc")
+
+    elif (grade == 'FL' or grade == 'UF'):
+      wam_mark = wam_mark + mark*uoc
+      wam_uoc = wam_uoc + uoc
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   fail")
+    
+    elif (grade == 'AF'):
+      wam_uoc = wam_uoc + uoc
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   fail")
+    
+    elif (grade == 'AS' or grade == 'AW' or grade == 'PW' or grade == 'RD'
+          or grade == 'NF' or grade == 'LE' or grade == 'PE' or grade == 'WD' or grade == 'WJ'):
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}")  
+
+    elif ('A' in grade or 'B' in grade or 'C' in grade or 'D' in grade):
+      total_uoc = total_uoc + uoc
+      print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc")
+  
+  # Print UOC and Wam
+  wam = wam_mark/wam_uoc
+  wam = round(wam, 1)
+  print(f"UOC = {total_uoc}, WAM = {wam}")
+
+except psycopg2.Error as err:
+  print("DB error: ", err)
+finally:
+  if db:
+    db.close()

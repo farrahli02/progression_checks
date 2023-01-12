@@ -1,0 +1,353 @@
+#!/usr/bin/python3
+# COMP3311 21T3 Ass2 ... progression check for a given student
+
+import sys
+import psycopg2
+import re
+from helpers import getStudent, getProgram, getStream, getSubject
+
+# define any local helper functions here
+
+
+### set up some globals
+
+usage = f"Usage: {sys.argv[0]} zID [Program Stream]"
+db = None
+
+### process command-line args
+
+argc = len(sys.argv)
+if argc < 2:
+  print(usage)
+  exit(1)
+zid = sys.argv[1]
+if zid[0] == 'z':
+  zid = zid[1:8]
+digits = re.compile("^\d{7}$")
+if not digits.match(zid):
+  print("Invalid student ID")
+  exit(1)
+
+progCode = None
+strmCode = None
+
+e_query = """
+select p.code,s.code,t.starting
+from students st 
+join program_enrolments pe on pe.student = st.id
+join programs p on p.id = pe.program
+join stream_enrolments se on se.partof = pe.id
+join streams s on s.id = se.stream
+join terms t on t.id = pe.term
+where st.id = %s
+order by t.starting desc
+"""
+
+if argc == 4:
+  progCode = sys.argv[2]
+  strmCode = sys.argv[3]
+else: 
+  db = psycopg2.connect("dbname=mymyunsw")
+  
+  cur5 = db.cursor()
+  cur5.execute(e_query, [zid])
+  res5 = cur5.fetchall()
+  progCode = res5[0][0]
+  strmCode = res5[0][1]
+
+query = """
+select s.code,t.code,s.name,e.mark,e.grade,s.uoc
+from students st
+join course_enrolments e on e.student = st.id
+join courses c on c.id = e.course
+join subjects s on s.id = c.subject
+join terms t on c.term = t.id
+where st.id = %s
+order by t.starting, s.code
+"""
+
+p_query = """
+select p.name, o.longname, r.type, r.min_req, r.max_req, a.name, a.defby, a.definition
+from programs p
+join orgunits o on p.offeredby = o.id
+join program_rules pr on cast(p.code as int) = pr.program
+join rules r on pr.rule = r.id
+join academic_object_groups a on r.ao_group = a.id
+where p.code = %s
+order by r.id
+"""
+
+s_query = """
+select s.name, o.longname, r.type, r.min_req, r.max_req, a.name, a.defby, a.definition
+from streams s
+join orgunits o on s.offeredby = o.id
+join stream_rules sr on s.id = sr.stream
+join rules r on sr.rule = r.id
+join academic_object_groups a on r.ao_group = a.id
+where s.code = %s
+order by r.id
+"""
+
+# Helper function that prints stream code and name and deals with alternative streams
+def printStreams(string):
+  # Print stream name
+  if (getStream(db, string) is not None):
+    stream = getStream(db, string)
+    stream_name = stream[2]
+  elif (getSubject(db, string) is not None):
+    stream = getSubject(db, string)
+    stream_name = stream[2]
+  else :
+    stream_name = '???'
+
+  # Deal with alternative subjects
+  if (string[0] == '{'):        
+    # Print stream name
+    if (getStream(db, string[1:9]) is not None):
+      stream = getStream(db, string[1:9])
+      stream_name = stream[2]
+    elif (getSubject(db, string[1:9]) is not None):
+      stream = getSubject(db, string[1:9])
+      stream_name = stream[2]
+    else :
+      stream_name = '???'
+    print(f"- {string[1:9]} {stream_name}")
+
+    # Print stream name
+    if (getStream(db, string[10:18]) is not None):
+      stream = getStream(db, string[10:18])
+      stream_name = stream[2]
+    elif (getSubject(db, string[10:18]) is not None):
+      stream = getSubject(db, string[10:18])
+      stream_name = stream[2]
+    else :
+      stream_name = '???'
+    print(f"  or {string[10:18]} {stream_name}")
+  else: 
+    print(f"- {string} {stream_name}")
+
+# manipulate database
+
+try:
+  db = psycopg2.connect("dbname=mymyunsw")
+  stuInfo = getStudent(db,zid)
+  
+  cur1 = db.cursor()
+  cur1.execute(query, [zid])
+  res1 = cur1.fetchall()
+  
+  if not stuInfo:
+    print(f"Invalid student id {zid}")
+    exit()
+  
+  # Print out the zid and name
+  print(f"{zid} {stuInfo[1]}, {stuInfo[2]}")
+
+  if progCode:
+    progInfo = getProgram(db,progCode)
+    if not progInfo:
+      print(f"Invalid program code {progCode}")
+      exit()
+    print(f"  {progCode} {progInfo[2]}")
+
+  if strmCode:
+    strmInfo = getStream(db,strmCode)
+    if not strmInfo:
+      print(f"Invalid program code {strmCode}")
+      exit()
+    print(f"  {strmCode} {strmInfo[2]}")
+
+
+
+
+  cur3 = db.cursor()
+  cur3.execute(s_query, [strmCode])
+  res3 = cur3.fetchall()
+
+  cur2 = db.cursor()
+  cur2.execute(p_query, [progCode])
+  res2 = cur2.fetchall()
+
+  res4 = res3 + res2
+
+  # Print transcript
+  wam_uoc = 0
+  list_subjects = []
+  dict_electives = {}
+  all_defs = 'a'
+  allpe_defs = 'a'
+  gen_ed_uoc = 0
+  free_min_uoc = 0
+  free_max_uoc = 0
+
+  # Get a string of all the courses in core courses of a stream
+  for s_name, org, rule_code, min_req, max_req, ao_group, ao_defby, ao_def in res4:
+    if (rule_code == 'CC'):
+      all_defs = all_defs + ao_def
+    if (rule_code == 'GE'):
+      gen_ed_uoc = min_req
+    if (rule_code == 'PE'):
+      if (max_req is None and min_req is not None and min_req > 0):
+        max_req = 6
+      elif (min_req is None):
+        min_req = 0
+      elif (max_req is None):
+        max_req = 0
+
+      dict_electives[ao_group] = (min_req, max_req)
+      allpe_defs = allpe_defs + ao_def
+    if (rule_code == 'FE'):
+      if (max_req is None and min_req is not None and min_req > 0):
+        max_req = 6
+      elif (min_req is None):
+        min_req = 0
+      elif (max_req is None):
+        max_req = 0
+      
+      free_min_uoc = min_req
+      free_max_uoc = max_req
+     
+
+  print("\nCompleted:")
+  for course_code, term, subject, mark, grade, uoc in res1:
+   
+    for s_name, org, rule_code, min_req, max_req, ao_group, ao_defby, ao_def in res4:
+      
+      # Change None grades to -
+      if (mark is None): 
+        mark = '-'
+      ao = None
+
+      # Print out results based on grades
+      if (grade == 'HD' or grade == 'DN' or grade == 'CR' or grade == 'PS'):
+        
+        if (rule_code == 'CC' and course_code in ao_def):
+          wam_uoc = wam_uoc + uoc
+          list_subjects.append(course_code)
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards {ao_group}")
+          break
+        elif (rule_code == 'PE' and course_code not in all_defs and dict_electives[ao_group][1] > 0):
+          if (course_code[0:5]+'###' in ao_def or course_code in ao_def):
+            wam_uoc = wam_uoc + uoc
+            dict_electives[ao_group] = (dict_electives[ao_group][0] - 6, dict_electives[ao_group][1] - 6)
+            print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards {ao_group}")          
+            break
+        elif (course_code not in all_defs and course_code[0:5]+'###' not in allpe_defs and free_min_uoc > 0):
+          wam_uoc = wam_uoc + uoc
+          free_max_uoc = free_max_uoc - 6
+          free_min_uoc = free_min_uoc - 6
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards Free Electives")
+          break
+        elif(course_code[0:3] == 'GEN'):
+          gen_ed_uoc = gen_ed_uoc - 6
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards General Education")
+          break
+        elif (course_code not in all_defs and course_code not in allpe_defs and (course_code[0:5]+'###' not in allpe_defs) and free_max_uoc <= 0):
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   0uoc does not satisfy any rule")
+          break
+   
+          
+
+      elif (grade == 'SY' or grade == 'EC' or grade == 'NC' or grade == 'XE' or grade == 'T'):
+        if (rule_code == 'CC' and course_code in ao_def):
+          wam_uoc = wam_uoc + uoc
+          list_subjects.append(course_code)
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards {ao_group}")
+          break
+        elif (rule_code == 'PE' and course_code not in all_defs and dict_electives[ao_group][1] > 0):
+          if (course_code[0:5]+'###' in ao_def or course_code in ao_def):
+            wam_uoc = wam_uoc + uoc
+            dict_electives[ao_group] = (dict_electives[ao_group][0] - 6, dict_electives[ao_group][1] - 6)
+            print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards {ao_group}")
+            break
+        elif (course_code not in all_defs and course_code[0:5]+'###' not in allpe_defs and free_min_uoc > 0):
+          wam_uoc = wam_uoc + uoc
+          free_max_uoc = free_max_uoc - 6
+          free_min_uoc = free_min_uoc - 6
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards Free Electives")
+          break
+        elif(course_code[0:3] == 'GEN'):
+          gen_ed_uoc = gen_ed_uoc - 6
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc towards General Education")
+          break
+        elif (course_code not in all_defs and course_code not in allpe_defs and (course_code[0:5]+'###' not in allpe_defs) and free_max_uoc <= 0):
+          print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   0uoc does not satisfy any rule")
+          break
+      
+      elif (grade == 'FL' or grade == 'UF'):
+        print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   fail does not count")
+        break
+      
+      elif (grade == 'AF'):
+        print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}   fail does not count")
+        break
+      
+      elif (grade == 'AS' or grade == 'AW' or grade == 'PW' or grade == 'RD'
+            or grade == 'NF' or grade == 'LE' or grade == 'PE' or grade == 'WD' or grade == 'WJ'):
+        print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}")  
+
+      elif ('A' in grade or 'B' in grade or 'C' in grade or 'D' in grade):
+        total_uoc = total_uoc + uoc
+        print(f"{course_code} {term} {subject:<31}{mark:>4} {grade}  {uoc:>2}uoc")
+
+
+
+  # Print UOC and Wam
+  print(f"UOC = {wam_uoc} so far")
+
+  print("\nRemaining to complete degree:")
+  
+  for s_name, org, rule_code, min_req, max_req, ao_group, ao_defby, ao_def in res4:
+    marker = 0
+    if (rule_code == 'CC'):
+      for string in ao_def.split(","): 
+      
+        for course_code in list_subjects:
+          if (course_code in string):
+            marker = 1
+        if (marker == 0):
+          printStreams(string)
+        marker = 0
+      
+  for s_name, org, rule_code, min_req, max_req, ao_group, ao_defby, ao_def in res4:
+    if (rule_code == 'PE'):
+      for ao_group in dict_electives:      
+        
+        if (dict_electives[ao_group][0] > 0 ):
+          print(f"at least {dict_electives[ao_group][0]} UOC courses from {ao_group}")
+          break
+        elif (dict_electives[ao_group][0] <= 0 and dict_electives[ao_group][1] > 0):
+          print(f"between 0 and {dict_electives[ao_group][1]} UOC courses from {ao_group}")
+          break
+        elif (dict_electives[ao_group][0] < dict_electives[ao_group][1] and dict_electives[ao_group][0] > 0 and dict_electives[ao_group][1] > 0):
+          print(f"between {dict_electives[ao_group][0]} and {dict_electives[ao_group][1]} UOC courses from {ao_group}")
+          break
+        elif (dict_electives[ao_group][0] == dict_electives[ao_group][1] and dict_electives[ao_group][0] > 1 and dict_electives[ao_group][1] > 1):
+          print(f"{dict_electives[ao_group][0]} UOC courses from {ao_group}")
+          break
+      else: 
+        continue
+      break
+
+  if (free_min_uoc > 0):
+    if (free_min_uoc > 0 and free_max_uoc <= 0):
+
+      print(f"at least {free_min_uoc} UOC of Free Electives")
+    elif (free_min_uoc <= 0 and free_max_uoc > 0):
+      print(f"between 0 and {free_max_uoc} UOC of Free Electives")
+    elif (free_min_uoc < free_max_uoc and free_min_uoc > 0 and free_max_uoc):
+      print(f"between {free_min_uoc} and {free_max_uoc} UOC of Free Electives")
+    elif (free_min_uoc == free_max_uoc and free_min_uoc > 1 and free_max_uoc > 1):
+      print(f"{free_min_uoc} UOC of Free Electives")
+
+  
+  if (gen_ed_uoc > 0):
+    print(f"{gen_ed_uoc} UOC of General Education")
+
+
+except Exception as err:
+  print("DB error: ", err)
+finally:
+  if db:
+    db.close()
+
